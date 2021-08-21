@@ -1,0 +1,79 @@
+#!/usr/bin/env python
+import sys
+from pyspark import SparkConf, SparkContext
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import split, col, trim, udf, lit, explode
+from pyspark.sql.types import StructType, StructField, StringType, Row, ArrayType, IntegerType
+
+conf = SparkConf().setMaster("local").setAppName("OrphanPages")
+conf.set("spark.driver.bindAddress", "127.0.0.1")
+sc = SparkContext(conf = conf)
+
+# Help Function:
+
+
+def remove_selflink(link, connectedLink):
+    if link in connectedLink:
+        connectedLink.remove(link)
+    return connectedLink
+
+
+# START:
+
+
+lines = sc.textFile(sys.argv[1], 1)
+
+# to have RDD.toDF function, you need to implicitly have a spark session
+spark = SparkSession(sc)
+
+# Coverting RDD to Dataframe with 1 column
+fixed_rdd = lines.map(lambda x: Row(x))
+
+# corresponding schema
+sch = StructType([StructField('inputLine', StringType(), True)])
+
+# then finally, convert fixed_rdd to a DF
+df = fixed_rdd.toDF(schema=sch)
+
+# Split output into dataframe with 2 column
+df2 = df.withColumn('page', split(df['inputLine'], ':').getItem(0).cast(IntegerType()))\
+       .withColumn('connectedPage', split(df['inputLine'], ':').getItem(1))\
+        .drop('inputLine')
+
+df2 = df2.withColumn(
+    'connectedPage',
+    split(trim(col("connectedPage")), " ")
+        .cast(ArrayType(IntegerType()))
+    )
+
+# udf - remove page that links to itself
+# df_clean = df2.withColumn(
+#     'connectedPage',
+#     udf(remove_selflink, ArrayType(IntegerType()))(col('page'), col('connectedPage'))
+# )
+
+# pages on left side - could be orphan
+df_page = df2.select('page').distinct()
+# pages on right side - not orphan
+df_connectedPage = df2\
+    .select('connectedPage')\
+    .withColumn("connectedPage", explode(col('connectedPage')))\
+    .distinct()
+
+# => orphan = left that are NOT on right
+#df_orphans = df_page.join(df_connectedPage, df_page.page == df_connectedPage.connectedPage, how='leftanti')
+left = set(df_page.collect())
+right = set(df_connectedPage.collect())
+
+res = [str(it) for it in left if it not in right]
+res = sorted(res)
+
+#result = df_orphans.select('page').rdd.map(lambda row : row[0]).collect()
+#result = df_orphans.select('page').collect()
+#result = sorted(result)
+
+with open(sys.argv[2], "w") as output:
+    [output.write(line + "\n") for line in res]
+#write results to output file. Foramt for each line: (line+"\n")
+
+sc.stop()
